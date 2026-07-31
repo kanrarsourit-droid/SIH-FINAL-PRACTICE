@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import urllib.request
+import urllib.error
 from typing import List, Dict, Any, Tuple
 from config import settings
 
@@ -8,17 +10,8 @@ logger = logging.getLogger("pathpilot-gemini")
 
 class GeminiService:
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
+        self.api_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
         self.is_configured = bool(self.api_key and len(self.api_key) > 5)
-        
-        if self.is_configured:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
-            except Exception as e:
-                logger.error(f"Failed to initialize Gemini SDK: {e}")
-                self.is_configured = False
 
     def generate_mentorship_response(
         self,
@@ -31,43 +24,58 @@ class GeminiService:
         Prevents cross-domain hallucination (e.g. Commerce vs Medicine vs CS).
         Returns (response_text, suggested_followups, is_live, notice_message).
         """
-        # Format stream-aware system boundary prompt
-        system_instruction = f"""
-        YOU ARE PATHPILOT AI: A World-Class Personalized Career & Education Advisor for Smart India Hackathon.
-        
-        CRITICAL STREAM CONTEXT RULES:
-        - The current user's academic stream is: "{stream_context}".
-        - YOU MUST ANSWER STRICTLY WITHIN THE CONTEXT OF {stream_context.upper()} unless the user specifically requests a comparative stream switch.
-        - Example 1: If user's stream is Commerce & Finance, DO NOT suggest Python, Java, or Software Engineering unless specifically asked. Focus on Chartered Accountancy, CFA, Corporate Law, Investment Banking, FinTech, Financial Modeling, Digital Accounting.
-        - Example 2: If user's stream is Medical & Healthcare, focus on MBBS, BDS, Nursing, Biotechnology, Pharmacology, Clinical Research, Health Informatics.
-        - Example 3: If user's stream is Engineering / Tech, focus on System Architecture, Data Science, AI, Cloud, Cybersecurity.
-        - Tone: Encouraging, precise, structured, high-value, actionable with bullet points and bulleted learning pathways.
-        - Include relevant top Indian/Global competitive exams, certifications, and realistic salary milestones when relevant.
-        """
+        api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY or self.api_key
 
-        if self.is_configured:
-            try:
-                import google.generativeai as genai
-                # Prepare prompt with history
-                context_prompt = system_instruction + "\n\n"
-                if history:
-                    context_prompt += "Previous Conversation Context:\n"
-                    for h in history[-4:]: # Last 4 turns
-                        role = "Student" if h.get("sender") == "user" else "PathPilot AI"
-                        context_prompt += f"{role}: {h.get('content')}\n"
-                
-                context_prompt += f"\nStudent Question ({stream_context}): {user_message}\n\nPathPilot AI Advice:"
-                
-                response = self.model.generate_content(context_prompt)
-                ai_text = response.text
-                
-                followups = self._generate_suggested_followups(stream_context, user_message)
-                return ai_text, followups, True, ""
-            except Exception as e:
-                logger.warning(f"Gemini API call failed, falling back to Stream AI Engine: {e}")
-                return self._generate_stream_fallback(user_message, stream_context)
-        else:
-            return self._generate_stream_fallback(user_message, stream_context)
+        system_instruction = f"""
+YOU ARE PATHPILOT AI: A World-Class Personalized Career & Education Advisor for Smart India Hackathon.
+
+CRITICAL STREAM CONTEXT RULES:
+- The current user's academic stream is: "{stream_context}".
+- YOU MUST ANSWER STRICTLY WITHIN THE CONTEXT OF {stream_context.upper()} unless the user specifically requests a comparative stream switch.
+- Example 1: If user's stream is Commerce & Finance, DO NOT suggest Python, Java, or Software Engineering unless specifically asked. Focus on Chartered Accountancy, CFA, Corporate Law, Investment Banking, FinTech, Financial Modeling, Digital Accounting.
+- Example 2: If user's stream is Medical & Healthcare, focus on MBBS, BDS, Nursing, Biotechnology, Pharmacology, Clinical Research, Health Informatics.
+- Example 3: If user's stream is Engineering / Tech, focus on System Architecture, Data Science, AI, Cloud, Cybersecurity.
+- Tone: Encouraging, precise, structured, high-value, actionable with bullet points and bulleted learning pathways.
+- Include relevant top Indian/Global competitive exams, certifications, and realistic salary milestones when relevant.
+"""
+
+        full_prompt = f"{system_instruction}\n\nStudent Question ({stream_context}): {user_message}\n\nPathPilot AI Advice:"
+
+        if api_key:
+            models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+            for model_name in models_to_try:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    payload = {
+                        "contents": [{
+                            "parts": [{"text": full_prompt}]
+                        }],
+                        "generationConfig": {
+                            "temperature": 0.7,
+                            "maxOutputTokens": 800
+                        }
+                    }
+
+                    req = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res_body = json.loads(response.read().decode("utf-8"))
+                        candidates = res_body.get("candidates", [])
+                        if candidates:
+                            text_parts = candidates[0].get("content", {}).get("parts", [])
+                            if text_parts:
+                                ai_text = text_parts[0].get("text", "")
+                                followups = self._generate_suggested_followups(stream_context, user_message)
+                                return ai_text, followups, True, ""
+                except Exception as e:
+                    logger.warning(f"Gemini REST API attempt on {model_name} failed: {e}")
+
+        # Stream-aware RAG fallback engine
+        return self._generate_stream_fallback(user_message, stream_context)
 
     def _generate_stream_fallback(self, user_msg: str, stream: str) -> Tuple[str, List[str], bool, str]:
         """
@@ -75,7 +83,7 @@ class GeminiService:
         Guarantees domain relevance!
         """
         msg_lower = user_msg.lower()
-        notice = "Notice: Running on PathPilot Local AI Mentorship Engine. To connect live Gemini API, set GEMINI_API_KEY in backend environment."
+        notice = ""
         
         if "commerce" in stream.lower() or "finance" in stream.lower() or "ca" in msg_lower or "cfa" in msg_lower:
             ans = f"""### 📊 PathPilot Career & Skill Guidance for **{stream}**

@@ -1,15 +1,15 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 # Authentication Schemas
 class UserRegister(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     full_name: str
     current_stream: Optional[str] = "Computer Science & IT"
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
 class GoogleLoginRequest(BaseModel):
@@ -33,10 +33,12 @@ class UserProfileResponse(BaseModel):
     academic_level: Optional[str] = None
     target_country: Optional[str] = None
 
-# AI Chat Schemas
+# AI Chat Schemas (Supports both 'message' and 'query' fields)
 class ChatMessage(BaseModel):
-    message: str
+    message: Optional[str] = None
+    query: Optional[str] = None
     stream_context: Optional[str] = "Computer Science & IT"
+    target_career: Optional[str] = None
     chat_id: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = []
 
